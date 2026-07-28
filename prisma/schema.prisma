@@ -1,0 +1,451 @@
+// Datamodell for bestillingsplattformen, jf. paragraf 8 i den tekniske spesifikasjonen.
+//
+// Pengebelop lagres som heltall i minste enhet (ore), slik betalingsleverandorene
+// forventer det. Bruk formatAmount() i src/lib/money.ts for visning.
+//
+// Geometrikolonner er PostGIS-typer som Prisma ikke kjenner. De opprettes i
+// migreringen og leses gjennom raw SQL i src/server/geo.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  runtime  = "nodejs"
+}
+
+// Tilkoblingsstrengen settes i prisma.config.ts (CLI) og gjennom driver-adapteren
+// i src/lib/db.ts (applikasjonen), slik Prisma 7 krever.
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  KITCHEN
+  DELIVERY
+}
+
+enum OrderStatus {
+  DRAFT
+  AWAITING_PAYMENT
+  PAYMENT_AUTHORIZED
+  PENDING_RESTAURANT
+  ACCEPTING
+  ACCEPTED
+  PREPARING
+  READY_FOR_DELIVERY
+  OUT_FOR_DELIVERY
+  DELIVERED
+  DECLINED
+  CANCELLED
+  PAYMENT_FAILED
+  REFUND_PENDING
+  REFUNDED
+}
+
+enum PaymentStatus {
+  NOT_STARTED
+  PENDING
+  AUTHORIZED
+  CAPTURED
+  CANCELLED
+  FAILED
+  EXPIRED
+  REFUND_PENDING
+  REFUNDED
+}
+
+enum DeliveryTargetType {
+  CURRENT_POSITION
+  NEXT_TEE
+  SPECIFIC_HOLE
+  RESTAURANT_PICKUP
+  KIOSK_PICKUP
+}
+
+enum HolePosition {
+  TEE
+  FAIRWAY
+  GREEN
+}
+
+enum OrderEventType {
+  ORDER_CREATED
+  STATUS_CHANGED
+  PAYMENT_AUTHORIZED
+  PAYMENT_CAPTURED
+  PAYMENT_CANCELLED
+  PAYMENT_FAILED
+  PAYMENT_REFUNDED
+  ETA_UPDATED
+  LOCATION_UPDATED
+  DECLINED
+  CANCELLED_BY_CUSTOMER
+  CUSTOMER_NOT_FOUND
+  LOCATION_PURGED
+  NOTE
+}
+
+model Club {
+  id                     String   @id @default(uuid()) @db.Uuid
+  name                   String
+  slug                   String   @unique
+  address                String?
+  timezone               String   @default("Europe/Oslo")
+  currency               String   @default("NOK")
+  isOrderingEnabled      Boolean  @default(true) @map("is_ordering_enabled")
+  isCourseDeliveryPaused Boolean  @default(false) @map("is_course_delivery_paused")
+  pauseMessage           String?  @map("pause_message")
+  defaultPrepMinutes     Int      @default(20) @map("default_prep_minutes")
+  deliveryFee            Int      @default(0) @map("delivery_fee")
+  freeDeliveryThreshold  Int?     @map("free_delivery_threshold")
+  minimumOrderAmount     Int      @default(0) @map("minimum_order_amount")
+  phone                  String?
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+
+  staff                User[]
+  categories           Category[]
+  products             Product[]
+  holes                Hole[]
+  deliveryPoints       DeliveryPoint[]
+  orders               Order[]
+  openingHours         OpeningHours[]
+  specialOpeningHours  SpecialOpeningHours[]
+
+  @@map("clubs")
+}
+
+/// Kobles mot auth.users i Supabase. id er den samme som auth-brukerens id.
+model User {
+  id        String   @id @db.Uuid
+  clubId    String   @map("club_id") @db.Uuid
+  email     String   @unique
+  name      String
+  role      UserRole @default(KITCHEN)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  club            Club           @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  acceptedOrders  Order[]        @relation("OrderAcceptedBy")
+  assignedOrders  Order[]        @relation("OrderAssignedDriver")
+  orderEvents     OrderEvent[]
+
+  @@index([clubId])
+  @@map("users")
+}
+
+model Category {
+  id          String  @id @default(uuid()) @db.Uuid
+  clubId      String  @map("club_id") @db.Uuid
+  name        String
+  description String?
+  sortOrder   Int     @default(0) @map("sort_order")
+  isActive    Boolean @default(true) @map("is_active")
+
+  club     Club      @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  products Product[]
+
+  @@index([clubId])
+  @@map("categories")
+}
+
+model Product {
+  id                      String   @id @default(uuid()) @db.Uuid
+  clubId                  String   @map("club_id") @db.Uuid
+  categoryId              String   @map("category_id") @db.Uuid
+  name                    String
+  description             String?
+  /// Pris i ore.
+  price                   Int
+  imageUrl                String?  @map("image_url")
+  allergens               String[] @default([])
+  preparationMinutes      Int      @default(10) @map("preparation_minutes")
+  isAvailable             Boolean  @default(true) @map("is_available")
+  requiresAgeVerification Boolean  @default(false) @map("requires_age_verification")
+  sortOrder               Int      @default(0) @map("sort_order")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @updatedAt @map("updated_at")
+
+  club       Club            @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  category   Category        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  options    ProductOption[]
+  orderItems OrderItem[]
+
+  @@index([clubId])
+  @@index([categoryId])
+  @@map("products")
+}
+
+model ProductOption {
+  id             String  @id @default(uuid()) @db.Uuid
+  productId      String  @map("product_id") @db.Uuid
+  name           String
+  minimumChoices Int     @default(0) @map("minimum_choices")
+  maximumChoices Int     @default(1) @map("maximum_choices")
+  required       Boolean @default(false)
+  sortOrder      Int     @default(0) @map("sort_order")
+
+  product Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  values  ProductOptionValue[]
+
+  @@index([productId])
+  @@map("product_options")
+}
+
+model ProductOptionValue {
+  id              String  @id @default(uuid()) @db.Uuid
+  productOptionId String  @map("product_option_id") @db.Uuid
+  name            String
+  /// Tilleggspris i ore.
+  additionalPrice Int     @default(0) @map("additional_price")
+  isAvailable     Boolean @default(true) @map("is_available")
+  sortOrder       Int     @default(0) @map("sort_order")
+
+  option ProductOption @relation(fields: [productOptionId], references: [id], onDelete: Cascade)
+
+  @@index([productOptionId])
+  @@map("product_option_values")
+}
+
+model Hole {
+  id                String  @id @default(uuid()) @db.Uuid
+  clubId            String  @map("club_id") @db.Uuid
+  holeNumber        Int     @map("hole_number")
+  name              String?
+  par               Int?
+  isDeliveryEnabled Boolean @default(true) @map("is_delivery_enabled")
+  /// Omtrentlig spilletid for hullet, brukes til forslag om levering ved neste tee.
+  playMinutes       Int     @default(15) @map("play_minutes")
+
+  // PostGIS-kolonner. Opprettes i migreringen, leses via raw SQL.
+  areaGeometry       Unsupported("geometry(Polygon, 4326)")?    @map("area_geometry")
+  centerlineGeometry Unsupported("geometry(LineString, 4326)")? @map("centerline_geometry")
+  teeLocation        Unsupported("geometry(Point, 4326)")?      @map("tee_location")
+  greenLocation      Unsupported("geometry(Point, 4326)")?      @map("green_location")
+
+  club            Club            @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  deliveryPoints  DeliveryPoint[]
+  selectedInOrders Order[]        @relation("OrderSelectedHole")
+  suggestedInOrders Order[]       @relation("OrderSuggestedHole")
+
+  @@unique([clubId, holeNumber])
+  @@map("holes")
+}
+
+model DeliveryPoint {
+  id           String  @id @default(uuid()) @db.Uuid
+  clubId       String  @map("club_id") @db.Uuid
+  holeId       String? @map("hole_id") @db.Uuid
+  name         String
+  instructions String?
+  isActive     Boolean @default(true) @map("is_active")
+  isPickup     Boolean @default(false) @map("is_pickup")
+  sortOrder    Int     @default(0) @map("sort_order")
+
+  location Unsupported("geometry(Point, 4326)")? @map("location")
+
+  club   Club    @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  hole   Hole?   @relation(fields: [holeId], references: [id], onDelete: SetNull)
+  orders Order[]
+
+  @@index([clubId])
+  @@map("delivery_points")
+}
+
+model Order {
+  id          String @id @default(uuid()) @db.Uuid
+  clubId      String @map("club_id") @db.Uuid
+  orderNumber Int    @map("order_number")
+  /// Tilfeldig hemmelighet som gir kunden tilgang til statussiden uten konto.
+  publicToken String @unique @map("public_token")
+  /// Hindrer at dobbeltklikk oppretter to bestillinger.
+  idempotencyKey String? @unique @map("idempotency_key")
+
+  status OrderStatus @default(DRAFT)
+
+  customerName  String  @map("customer_name")
+  customerPhone String  @map("customer_phone")
+  customerEmail String? @map("customer_email")
+
+  selectedHoleId     String?            @map("selected_hole_id") @db.Uuid
+  selectedHolePosition HolePosition?    @map("selected_hole_position")
+  suggestedHoleId    String?            @map("suggested_hole_id") @db.Uuid
+  deliveryPointId    String?            @map("delivery_point_id") @db.Uuid
+  deliveryTargetType DeliveryTargetType @default(SPECIFIC_HOLE) @map("delivery_target_type")
+  deliveryInstruction String?           @map("delivery_instruction")
+  customerComment    String?            @map("customer_comment")
+
+  /// Belop i ore.
+  subtotalAmount Int @map("subtotal_amount")
+  deliveryFee    Int @default(0) @map("delivery_fee")
+  totalAmount    Int @map("total_amount")
+
+  estimatedDeliveryAt DateTime? @map("estimated_delivery_at")
+  declineReason       String?   @map("decline_reason")
+
+  paymentProvider  String        @default("mock") @map("payment_provider")
+  paymentReference String?       @map("payment_reference")
+  paymentStatus    PaymentStatus @default(NOT_STARTED) @map("payment_status")
+
+  acceptedById String?   @map("accepted_by") @db.Uuid
+  acceptedAt   DateTime? @map("accepted_at")
+  assignedDriverId String? @map("assigned_driver_id") @db.Uuid
+  deliveredAt  DateTime? @map("delivered_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  club          Club           @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  selectedHole  Hole?          @relation("OrderSelectedHole", fields: [selectedHoleId], references: [id], onDelete: SetNull)
+  suggestedHole Hole?          @relation("OrderSuggestedHole", fields: [suggestedHoleId], references: [id], onDelete: SetNull)
+  deliveryPoint DeliveryPoint? @relation(fields: [deliveryPointId], references: [id], onDelete: SetNull)
+  acceptedBy    User?          @relation("OrderAcceptedBy", fields: [acceptedById], references: [id], onDelete: SetNull)
+  assignedDriver User?         @relation("OrderAssignedDriver", fields: [assignedDriverId], references: [id], onDelete: SetNull)
+
+  items    OrderItem[]
+  events   OrderEvent[]
+  location OrderLocation?
+
+  @@unique([clubId, orderNumber])
+  @@index([clubId, status])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id        String @id @default(uuid()) @db.Uuid
+  orderId   String @map("order_id") @db.Uuid
+  productId String? @map("product_id") @db.Uuid
+
+  /// Navn og pris kopieres, slik at gamle bestillinger ikke endres av senere prisendringer.
+  productNameSnapshot String @map("product_name_snapshot")
+  unitPriceSnapshot   Int    @map("unit_price_snapshot")
+  quantity            Int
+  totalPrice          Int    @map("total_price")
+  customerComment     String? @map("customer_comment")
+
+  order   Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
+  options OrderItemOption[]
+
+  @@index([orderId])
+  @@map("order_items")
+}
+
+model OrderItemOption {
+  id                    String @id @default(uuid()) @db.Uuid
+  orderItemId           String @map("order_item_id") @db.Uuid
+  optionNameSnapshot    String @map("option_name_snapshot")
+  valueNameSnapshot     String @map("value_name_snapshot")
+  additionalPriceSnapshot Int  @default(0) @map("additional_price_snapshot")
+
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@index([orderItemId])
+  @@map("order_item_options")
+}
+
+/// En rad per bestilling, oppdateres med siste kjente posisjon.
+/// Koordinatene nullstilles av opprydningsrutinen 24 timer etter registrering.
+model OrderLocation {
+  orderId        String   @id @map("order_id") @db.Uuid
+  latitude       Float?
+  longitude      Float?
+  accuracyMeters Float?   @map("accuracy_meters")
+  recordedAt     DateTime @map("recorded_at")
+  purgedAt       DateTime? @map("purged_at")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("order_location")
+}
+
+model OrderEvent {
+  id          String         @id @default(uuid()) @db.Uuid
+  orderId     String         @map("order_id") @db.Uuid
+  eventType   OrderEventType @map("event_type")
+  oldStatus   OrderStatus?   @map("old_status")
+  newStatus   OrderStatus?   @map("new_status")
+  performedBy String?        @map("performed_by") @db.Uuid
+  /// CUSTOMER, STAFF, SYSTEM eller PAYMENT_PROVIDER.
+  actorType   String         @default("SYSTEM") @map("actor_type")
+  message     String?
+  metadata    Json?
+  createdAt   DateTime       @default(now()) @map("created_at")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user  User? @relation(fields: [performedBy], references: [id], onDelete: SetNull)
+
+  @@index([orderId, createdAt])
+  @@map("order_events")
+}
+
+model OpeningHours {
+  id                String @id @default(uuid()) @db.Uuid
+  clubId            String @map("club_id") @db.Uuid
+  /// 0 = sondag, 6 = lordag.
+  dayOfWeek         Int    @map("day_of_week")
+  orderingOpensAt   String @map("ordering_opens_at")
+  orderingClosesAt  String @map("ordering_closes_at")
+  deliveryOpensAt   String @map("delivery_opens_at")
+  deliveryClosesAt  String @map("delivery_closes_at")
+
+  club Club @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  @@unique([clubId, dayOfWeek])
+  @@map("opening_hours")
+}
+
+model SpecialOpeningHours {
+  id               String   @id @default(uuid()) @db.Uuid
+  clubId           String   @map("club_id") @db.Uuid
+  date             DateTime @db.Date
+  orderingOpensAt  String?  @map("ordering_opens_at")
+  orderingClosesAt String?  @map("ordering_closes_at")
+  isClosed         Boolean  @default(false) @map("is_closed")
+  reason           String?
+
+  club Club @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  @@unique([clubId, date])
+  @@map("special_opening_hours")
+}
+
+/// Reskontroen til den simulerte betalingsleverandoren.
+/// Ligger bevisst adskilt fra orders, slik at leverandorlaget kan byttes ut
+/// mot Vipps eller Stripe uten at ordremodellen endres.
+model MockPayment {
+  id             String    @id @default(uuid()) @db.Uuid
+  reference      String    @unique
+  orderId        String    @map("order_id") @db.Uuid
+  amount         Int
+  currency       String    @default("NOK")
+  /// CREATED, AUTHORIZED, CAPTURED, CANCELLED, FAILED, EXPIRED eller REFUNDED.
+  status         String    @default("CREATED")
+  capturedAmount Int       @default(0) @map("captured_amount")
+  refundedAmount Int       @default(0) @map("refunded_amount")
+  idempotencyKey String?   @map("idempotency_key")
+  authorizedAt   DateTime? @map("authorized_at")
+  expiresAt      DateTime  @map("expires_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@index([orderId])
+  @@map("mock_payments")
+}
+
+/// Gjor webhook-handtering idempotent, jf. paragraf 17.
+model PaymentWebhookEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  provider    String
+  eventId     String   @map("event_id")
+  eventType   String   @map("event_type")
+  reference   String?
+  payload     Json
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  @@unique([provider, eventId])
+  @@map("payment_webhook_events")
+}
