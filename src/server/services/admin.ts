@@ -1,7 +1,12 @@
 import { prisma } from "@/lib/db";
 import { kroner } from "@/lib/money";
 import { AppError, NotFoundError } from "@/server/errors";
-import type { productInputSchema, productPatchSchema } from "@/server/validation";
+import type {
+  categoryInputSchema,
+  categoryPatchSchema,
+  productInputSchema,
+  productPatchSchema,
+} from "@/server/validation";
 
 import type { z } from "zod";
 
@@ -28,11 +33,117 @@ export async function listProductsForAdmin(clubId: string) {
 }
 
 export async function listCategories(clubId: string) {
-  return prisma.category.findMany({
+  const categories = await prisma.category.findMany({
     where: { clubId },
-    orderBy: { sortOrder: "asc" },
-    select: { id: true, name: true, sortOrder: true, isActive: true },
+    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      sortOrder: true,
+      isActive: true,
+      _count: { select: { products: true } },
+    },
   });
+
+  return categories.map(({ _count, ...category }) => ({
+    ...category,
+    productCount: _count.products,
+  }));
+}
+
+/** Neste ledige plass bakerst, slik at nytt innhold ikke dukker opp midt i menyen. */
+async function nextCategorySortOrder(clubId: string): Promise<number> {
+  const last = await prisma.category.findFirst({
+    where: { clubId },
+    orderBy: { sortOrder: "desc" },
+    select: { sortOrder: true },
+  });
+
+  return last ? last.sortOrder + 1 : 0;
+}
+
+async function assertCategoryNameIsFree(clubId: string, name: string, exceptId?: string) {
+  const duplicate = await prisma.category.findFirst({
+    where: {
+      clubId,
+      name: { equals: name, mode: "insensitive" },
+      id: exceptId ? { not: exceptId } : undefined,
+    },
+    select: { id: true },
+  });
+
+  if (duplicate) {
+    throw new AppError(`Det finnes alt en kategori som heter «${name}».`, 409, "CATEGORY_EXISTS");
+  }
+}
+
+export async function createCategory(clubId: string, input: z.infer<typeof categoryInputSchema>) {
+  await assertCategoryNameIsFree(clubId, input.name);
+
+  return prisma.category.create({
+    data: {
+      clubId,
+      name: input.name,
+      description: input.description ?? null,
+      sortOrder: input.sortOrder ?? (await nextCategorySortOrder(clubId)),
+      isActive: input.isActive,
+    },
+  });
+}
+
+export async function updateCategory(
+  clubId: string,
+  categoryId: string,
+  input: z.infer<typeof categoryPatchSchema>,
+) {
+  const category = await prisma.category.findFirst({ where: { id: categoryId, clubId } });
+  if (!category) throw new NotFoundError("Fant ikke kategorien.");
+
+  if (input.name && input.name !== category.name) {
+    await assertCategoryNameIsFree(clubId, input.name, categoryId);
+  }
+
+  return prisma.category.update({
+    where: { id: categoryId },
+    data: {
+      name: input.name,
+      description: input.description,
+      sortOrder: input.sortOrder,
+      isActive: input.isActive,
+    },
+  });
+}
+
+export async function deleteCategory(clubId: string, categoryId: string) {
+  const category = await prisma.category.findFirst({ where: { id: categoryId, clubId } });
+  if (!category) throw new NotFoundError("Fant ikke kategorien.");
+
+  const products = await prisma.product.count({ where: { categoryId } });
+
+  // Product.category har onDelete: Restrict, sa databasen ville avvist slettingen
+  // uansett. Meldingen peker pa de to utveiene ansatte faktisk har.
+  if (products > 0) {
+    throw new AppError(
+      `Kategorien har ${products} ${products === 1 ? "produkt" : "produkter"}. ` +
+        "Flytt dem til en annen kategori, eller skjul kategorien i stedet for a slette den.",
+      409,
+      "CATEGORY_NOT_EMPTY",
+    );
+  }
+
+  return prisma.category.delete({ where: { id: categoryId } });
+}
+
+/** Neste ledige plass bakerst i kategorien. */
+async function nextProductSortOrder(categoryId: string): Promise<number> {
+  const last = await prisma.product.findFirst({
+    where: { categoryId },
+    orderBy: { sortOrder: "desc" },
+    select: { sortOrder: true },
+  });
+
+  return last ? last.sortOrder + 1 : 0;
 }
 
 export async function createProduct(clubId: string, input: z.infer<typeof productInputSchema>) {
@@ -44,14 +155,14 @@ export async function createProduct(clubId: string, input: z.infer<typeof produc
       clubId,
       categoryId: input.categoryId,
       name: input.name,
-      description: input.description,
+      description: input.description ?? null,
       price: kroner(input.priceKroner),
       imageUrl: input.imageUrl ?? null,
       allergens: input.allergens,
       preparationMinutes: input.preparationMinutes,
       isAvailable: input.isAvailable,
       requiresAgeVerification: input.requiresAgeVerification,
-      sortOrder: input.sortOrder,
+      sortOrder: input.sortOrder ?? (await nextProductSortOrder(input.categoryId)),
     },
   });
 }
@@ -170,18 +281,30 @@ export async function listDrivers(clubId: string) {
   });
 }
 
+/** Filtypene bota product-images godtar, jf. scripts/setup-storage.ts. */
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/avif": "avif",
+};
+
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
 export async function uploadProductImage(clubId: string, file: File) {
   const { getSupabaseAdminClient } = await import("@/lib/supabase/admin");
   const supabase = getSupabaseAdminClient();
 
-  if (!file.type.startsWith("image/")) {
-    throw new AppError("Filen ma vaere et bilde.", 400, "INVALID_FILE");
+  // Filendelsen utledes av innholdstypen, ikke av filnavnet kunden sendte, slik
+  // at navnet ikke kan pavirke stien i bota.
+  const extension = IMAGE_EXTENSIONS[file.type];
+  if (!extension) {
+    throw new AppError("Bildet ma vaere JPG, PNG, WEBP eller AVIF.", 400, "INVALID_FILE");
   }
-  if (file.size > 5 * 1024 * 1024) {
+  if (file.size > MAX_IMAGE_BYTES) {
     throw new AppError("Bildet kan maks vaere 5 MB.", 400, "FILE_TOO_LARGE");
   }
 
-  const extension = file.name.split(".").pop() ?? "jpg";
   const path = `${clubId}/${crypto.randomUUID()}.${extension}`;
 
   const { error } = await supabase.storage

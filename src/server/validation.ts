@@ -74,10 +74,20 @@ export const assignDriverSchema = z.object({
   driverId: z.uuid().nullable(),
 });
 
+export const categoryInputSchema = z.object({
+  name: z.string().min(2).max(80),
+  description: z.string().max(300).nullable().optional(),
+  /** Utelates den, legges kategorien bakerst i menyen. */
+  sortOrder: z.number().int().min(0).max(1000).optional(),
+  isActive: z.boolean().default(true),
+});
+
+export const categoryPatchSchema = categoryInputSchema.partial();
+
 export const productInputSchema = z.object({
   categoryId: z.uuid(),
   name: z.string().min(2).max(120),
-  description: z.string().max(400).optional(),
+  description: z.string().max(400).nullable().optional(),
   /** Pris i kroner slik den skrives inn i skjemaet. */
   priceKroner: z.number().min(0).max(10_000),
   imageUrl: z.string().max(500).nullable().optional(),
@@ -85,7 +95,8 @@ export const productInputSchema = z.object({
   preparationMinutes: z.number().int().min(0).max(180).default(10),
   isAvailable: z.boolean().default(true),
   requiresAgeVerification: z.boolean().default(false),
-  sortOrder: z.number().int().min(0).max(1000).default(0),
+  /** Utelates den, legges produktet bakerst i kategorien. */
+  sortOrder: z.number().int().min(0).max(1000).optional(),
 });
 
 export const productPatchSchema = productInputSchema.partial();

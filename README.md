@@ -182,14 +182,25 @@ POST   /api/admin/orders/{orderId}/status
 POST   /api/admin/orders/{orderId}/eta
 POST   /api/admin/orders/{orderId}/assign-driver
 POST   /api/admin/orders/{orderId}/not-found
+GET    /api/admin/categories
+POST   /api/admin/categories
+PATCH  /api/admin/categories/{categoryId}
+DELETE /api/admin/categories/{categoryId}
 GET    /api/admin/products
 POST   /api/admin/products
 PATCH  /api/admin/products/{productId}
 DELETE /api/admin/products/{productId}
 POST   /api/admin/products/{productId}/availability
+POST   /api/admin/uploads/product-image
 POST   /api/admin/ordering/pause
 POST   /api/admin/ordering/resume
 ```
+
+Menysiden i ansattpanelet dekker hele veien fra tom meny til publisert vare: opprett kategorier,
+legg produkter i dem, og last opp egne bilder. Bildene går til bøtta `product-images` gjennom
+`POST /api/admin/uploads/product-image`, som tar imot `multipart/form-data` med feltet `file`.
+Kategorier med produkter kan ikke slettes, siden `products.category_id` har `ON DELETE RESTRICT` —
+de skjules i stedet, og forsvinner da fra kundemenyen uten at historikken røres.
 
 ### Webhooks og drift
 

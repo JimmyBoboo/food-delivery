@@ -47,6 +47,18 @@ export async function apiPatch<T>(url: string, body: unknown): Promise<T> {
   return parse(response) as Promise<T>;
 }
 
+/**
+ * Multipart-opplasting. Content-Type settes ikke her, for nettleseren ma fa
+ * legge til boundary-verdien selv.
+ */
+export async function apiUpload<T>(url: string, file: File): Promise<T> {
+  const body = new FormData();
+  body.append("file", file);
+
+  const response = await fetch(url, { method: "POST", body });
+  return parse(response) as Promise<T>;
+}
+
 export async function apiDelete<T>(url: string): Promise<T> {
   const response = await fetch(url, { method: "DELETE" });
   return parse(response) as Promise<T>;

@@ -15,5 +15,11 @@ export default async function AdminProductsPage() {
     listCategories(session.clubId),
   ]);
 
-  return <ProductsAdmin initialProducts={products} categories={categories} role={session.role} />;
+  return (
+    <ProductsAdmin
+      initialProducts={products}
+      initialCategories={categories}
+      role={session.role}
+    />
+  );
 }

@@ -8,7 +8,7 @@ import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
 const LINKS = [
   { href: "/admin/orders", label: "Bestillinger" },
-  { href: "/admin/products", label: "Produkter" },
+  { href: "/admin/products", label: "Meny" },
   { href: "/admin/settings", label: "Innstillinger" },
 ];
 

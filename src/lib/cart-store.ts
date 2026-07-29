@@ -27,6 +27,9 @@ type CartState = {
   clear: () => void;
 };
 
+/** Ovre grense per linje, slik at feiltrykk ikke blir en bestilling pa hundre polser. */
+export const MAX_LINE_QUANTITY = 20;
+
 function lineKey(productId: string, optionValueIds: string[], comment?: string): string {
   return [productId, [...optionValueIds].sort().join("+"), comment ?? ""].join("|");
 }
@@ -53,7 +56,10 @@ export const useCart = create<CartState>()(
             return {
               lines: state.lines.map((candidate) =>
                 candidate.key === key
-                  ? { ...candidate, quantity: Math.min(candidate.quantity + quantity, 20) }
+                  ? {
+                      ...candidate,
+                      quantity: Math.min(candidate.quantity + quantity, MAX_LINE_QUANTITY),
+                    }
                   : candidate,
               ),
             };
@@ -85,6 +91,20 @@ export function cartSubtotal(lines: CartLine[]): number {
 
 export function cartItemCount(lines: CartLine[]): number {
   return lines.reduce((sum, line) => sum + line.quantity, 0);
+}
+
+/**
+ * Linja uten tilvalg og kommentar. Det er den «+»-knappen pa produktkortet i
+ * menyen legger til og teller opp.
+ */
+export function findPlainLine(lines: CartLine[], productId: string): CartLine | undefined {
+  const key = lineKey(productId, []);
+  return lines.find((line) => line.key === key);
+}
+
+/** Totalt antall av et produkt, uansett hvilke tilvalg linjene har. */
+export function productQuantity(lines: CartLine[], productId: string): number {
+  return lines.reduce((sum, line) => (line.productId === productId ? sum + line.quantity : sum), 0);
 }
 
 /** Lengste tilberedningstid i kurven, brukt til a foresla leveringspunkt. */
