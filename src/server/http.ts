@@ -20,7 +20,12 @@ export async function handle<T>(fn: () => Promise<T>): Promise<NextResponse> {
     return NextResponse.json(result ?? { ok: true });
   } catch (error) {
     if (error instanceof ZodError) {
-      return jsonError("Ugyldige data i foresporselen.", 400, "VALIDATION_ERROR", error.issues);
+      return jsonError(
+        error.issues[0]?.message ?? "Ugyldige data i foresporselen.",
+        400,
+        "VALIDATION_ERROR",
+        error.issues,
+      );
     }
     if (error instanceof AppError) {
       return jsonError(error.message, error.status, error.code, error.details);

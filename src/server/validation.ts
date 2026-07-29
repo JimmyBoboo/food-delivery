@@ -111,10 +111,83 @@ export const pauseOrderingSchema = z.object({
   message: z.string().max(200).optional(),
 });
 
+/**
+ * Nettleserens <input type="time"> kan sende «08:00», «08:00:00» eller
+ * «08:00:00.000». Databasen og sammenligningene bruker alltid «08:00».
+ */
+export function normalizeTimeOfDay(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const match = raw.trim().match(/^([01]?\d|2[0-3]):([0-5]\d)/);
+  if (!match) return null;
+  return `${match[1].padStart(2, "0")}:${match[2]}`;
+}
+
+const timeOfDaySchema = z.string().transform((value, ctx) => {
+  const normalized = normalizeTimeOfDay(value);
+  if (!normalized) {
+    ctx.addIssue({
+      code: "custom",
+      message: "Klokkeslett ma skrives som 08:00.",
+    });
+    return z.NEVER;
+  }
+  return normalized;
+});
+
+export const isoDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Datoen ma skrives som 2026-07-30.");
+
+const openingDaySchema = z
+  .object({
+    /** 0 er sondag, slik OpeningHours i databasen forventer. */
+    dayOfWeek: z.number().int().min(0).max(6),
+    /** Stengte dager lagres ikke som rader, jf. getAvailability. */
+    isClosed: z.boolean().default(false),
+    orderingOpensAt: timeOfDaySchema,
+    orderingClosesAt: timeOfDaySchema,
+    deliveryOpensAt: timeOfDaySchema,
+    deliveryClosesAt: timeOfDaySchema,
+  })
+  .refine((day) => day.isClosed || day.orderingOpensAt < day.orderingClosesAt, {
+    message: "Bestillinger ma apne for de stenger.",
+    path: ["orderingClosesAt"],
+  })
+  .refine((day) => day.isClosed || day.deliveryOpensAt < day.deliveryClosesAt, {
+    message: "Levering ma apne for den stenger.",
+    path: ["deliveryClosesAt"],
+  });
+
+export const openingHoursSchema = z.object({
+  days: z.array(openingDaySchema).length(7),
+});
+
+export const specialDaySchema = z
+  .object({
+    date: isoDateSchema,
+    isClosed: z.boolean().default(false),
+    /** Utelates de, gjelder klokkeslettene fra uketabellen. */
+    orderingOpensAt: timeOfDaySchema.nullable().default(null),
+    orderingClosesAt: timeOfDaySchema.nullable().default(null),
+    reason: z.string().max(200).nullable().default(null),
+  })
+  .refine(
+    (day) =>
+      day.isClosed ||
+      day.orderingOpensAt === null ||
+      day.orderingClosesAt === null ||
+      day.orderingOpensAt < day.orderingClosesAt,
+    { message: "Bestillinger ma apne for de stenger.", path: ["orderingClosesAt"] },
+  );
+
 export const clubSettingsSchema = z.object({
   defaultPrepMinutes: z.number().int().min(1).max(180).optional(),
   deliveryFeeKroner: z.number().min(0).max(1000).optional(),
   minimumOrderKroner: z.number().min(0).max(10_000).optional(),
+});
+
+export const holeDeliverySchema = z.object({
+  isDeliveryEnabled: z.boolean(),
 });
 
 export type CreateOrderInput = z.infer<typeof createOrderSchema>;

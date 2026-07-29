@@ -1,11 +1,14 @@
 import { prisma } from "@/lib/db";
 import { kroner } from "@/lib/money";
 import { AppError, NotFoundError } from "@/server/errors";
+import { clubDate, isoDateToUtc, utcToIsoDate } from "@/server/time";
 import type {
   categoryInputSchema,
   categoryPatchSchema,
+  openingHoursSchema,
   productInputSchema,
   productPatchSchema,
+  specialDaySchema,
 } from "@/server/validation";
 
 import type { z } from "zod";
@@ -262,6 +265,160 @@ export async function updateClubSettings(
         input.minimumOrderKroner === undefined ? undefined : kroner(input.minimumOrderKroner),
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Apningstider
+// ---------------------------------------------------------------------------
+
+/** Brukes til a fylle ut en dag som ikke har rad enna. */
+const FALLBACK_HOURS = {
+  orderingOpensAt: "08:00",
+  orderingClosesAt: "20:00",
+  deliveryOpensAt: "09:00",
+  deliveryClosesAt: "19:00",
+};
+
+export async function listOpeningHours(clubId: string) {
+  const club = await prisma.club.findUniqueOrThrow({
+    where: { id: clubId },
+    select: { timezone: true },
+  });
+
+  const today = clubDate(club.timezone);
+
+  const [rows, specialRows] = await Promise.all([
+    prisma.openingHours.findMany({
+      where: { clubId },
+      orderBy: { dayOfWeek: "asc" },
+      select: {
+        dayOfWeek: true,
+        orderingOpensAt: true,
+        orderingClosesAt: true,
+        deliveryOpensAt: true,
+        deliveryClosesAt: true,
+      },
+    }),
+    // Gamle spesialdager er bare stoy i redigeringen.
+    prisma.specialOpeningHours.findMany({
+      where: { clubId, date: { gte: isoDateToUtc(today) } },
+      orderBy: { date: "asc" },
+      select: {
+        date: true,
+        isClosed: true,
+        orderingOpensAt: true,
+        orderingClosesAt: true,
+        reason: true,
+      },
+    }),
+  ]);
+
+  // Dager uten rad er stengt, men skjemaet trenger likevel klokkeslett a starte
+  // pa. Da er klubbens vanlige tider et bedre utgangspunkt enn faste verdier.
+  const template = rows[0] ?? FALLBACK_HOURS;
+
+  const days = Array.from({ length: 7 }, (_, dayOfWeek) => {
+    const row = rows.find((candidate) => candidate.dayOfWeek === dayOfWeek);
+
+    return {
+      dayOfWeek,
+      isClosed: !row,
+      orderingOpensAt: row?.orderingOpensAt ?? template.orderingOpensAt,
+      orderingClosesAt: row?.orderingClosesAt ?? template.orderingClosesAt,
+      deliveryOpensAt: row?.deliveryOpensAt ?? template.deliveryOpensAt,
+      deliveryClosesAt: row?.deliveryClosesAt ?? template.deliveryClosesAt,
+    };
+  });
+
+  return {
+    days,
+    specialDays: specialRows.map((day) => ({
+      ...day,
+      date: utcToIsoDate(day.date),
+    })),
+    timezone: club.timezone,
+    today,
+  };
+}
+
+export async function saveOpeningHours(
+  clubId: string,
+  input: z.infer<typeof openingHoursSchema>,
+) {
+  const closedDays = input.days.filter((day) => day.isClosed).map((day) => day.dayOfWeek);
+  const openDays = input.days.filter((day) => !day.isClosed);
+
+  // Prisma avviser `in: []`, sa sletting hoppes over nar ingen dager er stengt.
+  await prisma.$transaction(async (tx) => {
+    if (closedDays.length > 0) {
+      await tx.openingHours.deleteMany({
+        where: { clubId, dayOfWeek: { in: closedDays } },
+      });
+    }
+
+    for (const day of openDays) {
+      await tx.openingHours.upsert({
+        where: { clubId_dayOfWeek: { clubId, dayOfWeek: day.dayOfWeek } },
+        create: {
+          clubId,
+          dayOfWeek: day.dayOfWeek,
+          orderingOpensAt: day.orderingOpensAt,
+          orderingClosesAt: day.orderingClosesAt,
+          deliveryOpensAt: day.deliveryOpensAt,
+          deliveryClosesAt: day.deliveryClosesAt,
+        },
+        update: {
+          orderingOpensAt: day.orderingOpensAt,
+          orderingClosesAt: day.orderingClosesAt,
+          deliveryOpensAt: day.deliveryOpensAt,
+          deliveryClosesAt: day.deliveryClosesAt,
+        },
+      });
+    }
+  });
+
+  return listOpeningHours(clubId);
+}
+
+export async function saveSpecialDay(clubId: string, input: z.infer<typeof specialDaySchema>) {
+  const date = isoDateToUtc(input.date);
+
+  // En stengt dag skal ikke ogsa ha klokkeslett, da blir raden selvmotsigende.
+  const opens = input.isClosed ? null : input.orderingOpensAt;
+  const closes = input.isClosed ? null : input.orderingClosesAt;
+
+  await prisma.specialOpeningHours.upsert({
+    where: { clubId_date: { clubId, date } },
+    create: {
+      clubId,
+      date,
+      isClosed: input.isClosed,
+      orderingOpensAt: opens,
+      orderingClosesAt: closes,
+      reason: input.reason,
+    },
+    update: {
+      isClosed: input.isClosed,
+      orderingOpensAt: opens,
+      orderingClosesAt: closes,
+      reason: input.reason,
+    },
+  });
+
+  return listOpeningHours(clubId);
+}
+
+export async function deleteSpecialDay(clubId: string, isoDate: string) {
+  const date = isoDateToUtc(isoDate);
+  const existing = await prisma.specialOpeningHours.findUnique({
+    where: { clubId_date: { clubId, date } },
+    select: { id: true },
+  });
+
+  if (!existing) throw new NotFoundError("Fant ikke spesialdagen.");
+
+  await prisma.specialOpeningHours.delete({ where: { id: existing.id } });
+  return listOpeningHours(clubId);
 }
 
 export async function setHoleDelivery(clubId: string, holeNumber: number, enabled: boolean) {

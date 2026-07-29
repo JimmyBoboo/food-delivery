@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { NotFoundError } from "@/server/errors";
+import { clubDate, clubDayOfWeek, clubTime, isoDateToUtc } from "@/server/time";
 
 export type MenuOptionValue = {
   id: string;
@@ -155,35 +156,49 @@ export async function getHoles(clubId: string) {
   return holes;
 }
 
+/** Klokkeslettene ligger som «08:00», og da kan de sammenlignes som tekst. */
+function isWithin(now: string, opens: string, closes: string): boolean {
+  return now >= opens && now <= closes;
+}
+
 /**
  * Avgjor om klubben tar imot bestillinger na, basert pa pauseknapper og
- * apningstider.
+ * apningstider. Alle klokkeslett tolkes i klubbens egen tidssone.
  */
 export async function getAvailability(clubId: string) {
   const club = await prisma.club.findUniqueOrThrow({ where: { id: clubId } });
-  const now = new Date();
 
-  const special = await prisma.specialOpeningHours.findFirst({
-    where: {
-      clubId,
-      date: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())),
-    },
-  });
+  const today = clubDate(club.timezone);
+  const currentTime = clubTime(club.timezone);
 
-  const regular = await prisma.openingHours.findUnique({
-    where: { clubId_dayOfWeek: { clubId, dayOfWeek: now.getDay() } },
-  });
+  const [special, regular] = await Promise.all([
+    prisma.specialOpeningHours.findFirst({
+      where: { clubId, date: isoDateToUtc(today) },
+    }),
+    prisma.openingHours.findUnique({
+      where: { clubId_dayOfWeek: { clubId, dayOfWeek: clubDayOfWeek(club.timezone) } },
+    }),
+  ]);
 
-  const currentTime = now.toTimeString().slice(0, 5);
+  // Spesialdagen overstyrer uketabellen, men bare for feltene den faktisk
+  // fyller ut. Den har ingen egne leveringstider.
   const opens = special?.orderingOpensAt ?? regular?.orderingOpensAt ?? null;
   const closes = special?.orderingClosesAt ?? regular?.orderingClosesAt ?? null;
+  const deliveryOpens = regular?.deliveryOpensAt ?? opens;
+  const deliveryCloses = regular?.deliveryClosesAt ?? closes;
 
+  // Dager uten registrerte apningstider regnes som stengt. Da blir en dag
+  // stengt ved a fjerne raden, og en glemt oppsett stopper bestillinger i
+  // stedet for a slippe dem gjennom dognet rundt.
   const withinHours =
-    special?.isClosed === true
+    special?.isClosed === true || opens === null || closes === null
       ? false
-      : opens === null || closes === null
-        ? true
-        : currentTime >= opens && currentTime <= closes;
+      : isWithin(currentTime, opens, closes);
+
+  const withinDeliveryHours =
+    withinHours && deliveryOpens !== null && deliveryCloses !== null
+      ? isWithin(currentTime, deliveryOpens, deliveryCloses)
+      : false;
 
   const reasons: string[] = [];
   if (!club.isOrderingEnabled) {
@@ -191,20 +206,30 @@ export async function getAvailability(clubId: string) {
   }
   if (special?.isClosed) {
     reasons.push(special.reason ?? "Restauranten er stengt i dag.");
-  } else if (!withinHours && opens && closes) {
+  } else if (opens === null || closes === null) {
+    reasons.push("Vi har ingen apningstider registrert i dag.");
+  } else if (!withinHours) {
     reasons.push(`Vi tar imot bestillinger mellom ${opens} og ${closes}.`);
   }
 
+  const isCourseDeliveryPaused = club.isCourseDeliveryPaused || !withinDeliveryHours;
+
   return {
     isOrderingEnabled: club.isOrderingEnabled && withinHours,
-    isCourseDeliveryPaused: club.isCourseDeliveryPaused,
+    isCourseDeliveryPaused,
     pauseMessage: club.pauseMessage,
-    courseDeliveryMessage: club.isCourseDeliveryPaused
-      ? "Levering pa banen er satt pa pause. Du kan hente bestillingen i restauranten."
-      : null,
+    courseDeliveryMessage: !isCourseDeliveryPaused
+      ? null
+      : club.isCourseDeliveryPaused
+        ? "Levering pa banen er satt pa pause. Du kan hente bestillingen i restauranten."
+        : deliveryOpens && deliveryCloses
+          ? `Vi kjorer ut pa banen mellom ${deliveryOpens} og ${deliveryCloses}. Utenfor det kan du hente bestillingen selv.`
+          : "Levering pa banen er ikke tilgjengelig na. Du kan hente bestillingen i restauranten.",
     reasons,
     opensAt: opens,
     closesAt: closes,
+    deliveryOpensAt: deliveryOpens,
+    deliveryClosesAt: deliveryCloses,
     defaultPrepMinutes: club.defaultPrepMinutes,
     deliveryFee: club.deliveryFee,
     freeDeliveryThreshold: club.freeDeliveryThreshold,

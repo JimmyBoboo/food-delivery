@@ -182,6 +182,12 @@ POST   /api/admin/orders/{orderId}/status
 POST   /api/admin/orders/{orderId}/eta
 POST   /api/admin/orders/{orderId}/assign-driver
 POST   /api/admin/orders/{orderId}/not-found
+GET    /api/admin/opening-hours
+PATCH  /api/admin/opening-hours
+POST   /api/admin/opening-hours/special
+DELETE /api/admin/opening-hours/special/{date}
+PATCH  /api/admin/settings
+POST   /api/admin/holes/{holeNumber}/delivery
 GET    /api/admin/categories
 POST   /api/admin/categories
 PATCH  /api/admin/categories/{categoryId}

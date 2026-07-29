@@ -2,9 +2,12 @@
 
 import { useState } from "react";
 
+import { ClubDefaultsEditor } from "@/components/admin/club-defaults-editor";
+import { OpeningHoursEditor } from "@/components/admin/opening-hours-editor";
 import { Alert, Badge, Button, Card, Spinner } from "@/components/ui";
-import { apiPost } from "@/lib/api";
-import { formatAmount } from "@/lib/money";
+import { apiGet, apiPost } from "@/lib/api";
+import type { listOpeningHours } from "@/server/services/admin";
+import type { getAvailability } from "@/server/services/menu";
 
 type Club = {
   name: string;
@@ -17,19 +20,36 @@ type Club = {
   minimumOrderAmount: number;
 };
 
+type OpeningHoursData = Awaited<ReturnType<typeof listOpeningHours>>;
+type Availability = Awaited<ReturnType<typeof getAvailability>>;
+
 export function SettingsView({
   club,
   holes,
+  openingHours,
+  availability: initialAvailability,
+  role,
   orderUrl,
 }: {
   club: Club;
   holes: { holeNumber: number; isDeliveryEnabled: boolean }[];
+  openingHours: OpeningHoursData;
+  availability: Availability;
+  role: string;
   orderUrl: string;
 }) {
+  const canManage = role === "ADMIN" || role === "MANAGER";
   const [state, setState] = useState(club);
+  const [availability, setAvailability] = useState(initialAvailability);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+
+  async function refreshAvailability() {
+    const next = await apiGet<Availability>(`/api/clubs/${club.slug}/availability`);
+    setAvailability(next);
+    return next;
+  }
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
@@ -43,7 +63,8 @@ export function SettingsView({
     }
   }
 
-  const deliveryHoles = holes.filter((hole) => hole.isDeliveryEnabled).length;
+  const outsideHours =
+    state.isOrderingEnabled && !availability.isOrderingEnabled && availability.reasons.length > 0;
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 px-4 py-5">
@@ -59,12 +80,39 @@ export function SettingsView({
 
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={state.isOrderingEnabled ? "success" : "danger"}>
-            {state.isOrderingEnabled ? "Tar imot bestillinger" : "Bestillinger pauset"}
+            {state.isOrderingEnabled ? "Pause av" : "Manuelt pauset"}
           </Badge>
-          <Badge tone={state.isCourseDeliveryPaused ? "warning" : "success"}>
-            {state.isCourseDeliveryPaused ? "Banelevering pauset" : "Leverer pa banen"}
+          <Badge tone={availability.isOrderingEnabled ? "success" : "warning"}>
+            {availability.isOrderingEnabled
+              ? "Kunder kan bestille na"
+              : "Kunder kan ikke bestille na"}
+          </Badge>
+          <Badge tone={availability.isCourseDeliveryPaused ? "warning" : "success"}>
+            {availability.isCourseDeliveryPaused
+              ? "Banelevering utilgjengelig"
+              : "Leverer pa banen"}
           </Badge>
         </div>
+
+        {/*
+          «Gjenoppta alt» skrur bare av pauseknappen. Apningstidene gjelder fortsatt,
+          sa midt pa natta er menyen stengt selv om pausen er av.
+        */}
+        {outsideHours ? (
+          <Alert tone="warning" title="Apningstidene stenger for bestilling">
+            {availability.reasons[0]}
+            {availability.opensAt && availability.closesAt
+              ? ` Utvid tidene under Apningstider hvis du vil teste na.`
+              : " Sett apningstider for i dag under Apningstider."}
+          </Alert>
+        ) : null}
+
+        {!state.isOrderingEnabled ? (
+          <Alert tone="warning" title="Bestilling er manuelt pauset">
+            Kundene ser at restauranten ikke tar imot bestillinger. Trykk «Gjenoppta alt» for a
+            skru av pausen.
+          </Alert>
+        ) : null}
 
         <label className="block">
           <span className="text-sm font-semibold text-fairway-900">
@@ -92,6 +140,7 @@ export function SettingsView({
                   message: message || undefined,
                 });
                 setState((current) => ({ ...current, ...result }));
+                await refreshAvailability();
               })
             }
           >
@@ -108,6 +157,7 @@ export function SettingsView({
                   isCourseDeliveryPaused: boolean;
                 }>("/api/admin/ordering/pause", { scope: "ALL", message: message || undefined });
                 setState((current) => ({ ...current, ...result }));
+                await refreshAvailability();
               })
             }
           >
@@ -123,6 +173,7 @@ export function SettingsView({
                   isCourseDeliveryPaused: boolean;
                 }>("/api/admin/ordering/resume");
                 setState((current) => ({ ...current, ...result }));
+                await refreshAvailability();
               })
             }
           >
@@ -132,31 +183,17 @@ export function SettingsView({
         </div>
       </Card>
 
-      <Card className="space-y-2 p-4">
-        <h2 className="font-bold text-fairway-900">Standardverdier</h2>
-        <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
-          <div>
-            <dt className="text-fairway-600">Standard leveringstid</dt>
-            <dd className="font-semibold text-fairway-900">{state.defaultPrepMinutes} min</dd>
-          </div>
-          <div>
-            <dt className="text-fairway-600">Leveringsgebyr</dt>
-            <dd className="font-semibold text-fairway-900">{formatAmount(state.deliveryFee)}</dd>
-          </div>
-          <div>
-            <dt className="text-fairway-600">Minstebelop</dt>
-            <dd className="font-semibold text-fairway-900">
-              {formatAmount(state.minimumOrderAmount)}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-fairway-600">Hull med levering</dt>
-            <dd className="font-semibold text-fairway-900">
-              {deliveryHoles} av {holes.length}
-            </dd>
-          </div>
-        </dl>
-      </Card>
+      <OpeningHoursEditor initial={openingHours} canManage={canManage} />
+
+      <ClubDefaultsEditor
+        initial={{
+          defaultPrepMinutes: state.defaultPrepMinutes,
+          deliveryFee: state.deliveryFee,
+          minimumOrderAmount: state.minimumOrderAmount,
+        }}
+        initialHoles={holes}
+        canManage={canManage}
+      />
 
       <Card className="space-y-2 p-4">
         <h2 className="font-bold text-fairway-900">Lenke og QR-kode</h2>

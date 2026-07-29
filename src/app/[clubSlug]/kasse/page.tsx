@@ -2,7 +2,12 @@ import { notFound } from "next/navigation";
 
 import { CheckoutView } from "@/components/checkout/checkout-view";
 import { NotFoundError } from "@/server/errors";
-import { getClubBySlug, getDeliveryPoints, getHoles } from "@/server/services/menu";
+import {
+  getAvailability,
+  getClubBySlug,
+  getDeliveryPoints,
+  getHoles,
+} from "@/server/services/menu";
 
 export const dynamic = "force-dynamic";
 
@@ -15,9 +20,10 @@ export default async function CheckoutPage({
 
   try {
     const club = await getClubBySlug(clubSlug);
-    const [deliveryPoints, holes] = await Promise.all([
+    const [deliveryPoints, holes, availability] = await Promise.all([
       getDeliveryPoints(club.id),
       getHoles(club.id),
+      getAvailability(club.id),
     ]);
 
     return (
@@ -25,7 +31,8 @@ export default async function CheckoutPage({
         club={club}
         holes={holes}
         deliveryPoints={deliveryPoints}
-        isCourseDeliveryPaused={club.isCourseDeliveryPaused}
+        // Tar hensyn til bade pauseknappen og leveringsvinduet i apningstidene.
+        isCourseDeliveryPaused={availability.isCourseDeliveryPaused}
       />
     );
   } catch (error) {
